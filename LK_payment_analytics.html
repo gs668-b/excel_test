@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>店铺总利润分析</title>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
+</head>
+
+<body>
+    <div>
+        <label for="parameter-select">参数 (取bottom 10 & top 10 ASIN展示) :</label>
+        <select id="parameter-select">
+            <option value="总利润">总利润</option>
+            <option value="销售数量">销售数量</option>
+            <option value="广告支出">广告支出</option>
+        </select>
+    </div>
+    <!-- <h3 id="chart-title">总利润</h3> -->
+    <div id="chart" style="max-width: 80%; height: 880px;"></div>
+
+    <script>
+        // 数据来源（本地文件地址，替换为实际链接即可）
+        const excelUrl = 'https://rawcdn.githack.com/gs668-b/excel_test/ad81644c174f1fd59432f91ab9868e08080d62c9/LK2405~2411payment_originaldata1.xlsx';
+
+        // 用于加载Excel文件
+        async function loadExcelData() {
+            return new Promise((resolve, reject) => {
+                const req = new XMLHttpRequest();
+                req.open('GET', excelUrl, true);
+                req.responseType = 'arraybuffer';
+                req.onload = function () {
+                    if (req.status >= 200 && req.status < 300) {
+                        try {
+                            const data = new Uint8Array(req.response);
+                            const workbook = XLSX.read(data, { type: 'array' });
+                            const sheetName = workbook.SheetNames[0];
+                            const sheet = workbook.Sheets[sheetName];
+                            if (!sheet) {
+                                reject('未找到有效的工作表，请检查文件内容。');
+                                return;
+                            }
+                            const jsonData = XLSX.utils.sheet_to_json(sheet, { defval: null });
+                            resolve(jsonData);
+                        } catch (error) {
+                            reject(`Excel 解析错误: ${error.message}`);
+                        }
+                    } else {
+                        reject(`请求失败: ${req.statusText}`);
+                    }
+                };
+                req.onerror = () => reject('文件加载失败，请检查路径或网络连接。');
+                req.send();
+            });
+        }
+
+        async function processData(parameter) {
+            const rawData = await loadExcelData();
+
+            const filteredData = rawData.filter(row =>
+                row['店铺'].replace(/\s+/g, ' ').trim() === 'LOFTEK Direct' &&
+                row['币种'].replace(/\s+/g, ' ').trim() === 'USD' &&
+                row['销售数量'] > 0
+            );
+
+            const asinGroups = {};
+            filteredData.forEach(row => {
+                const asin = row['ASIN'];
+                if (!asinGroups[asin]) {
+                    asinGroups[asin] = { main_image_link: row['main_image_link'], values: [], months: [] };
+                }
+                asinGroups[asin].values.push(row[parameter]);
+                asinGroups[asin].months.push(row['month']);
+            });
+
+            const asinAverages = Object.entries(asinGroups).map(([asin, data]) => {
+                const averageValue = data.values.reduce((a, b) => a + b, 0) / data.values.length;
+                return { asin, main_image_link: data.main_image_link, averageValue, months: data.months, values: data.values };
+            });
+
+            asinAverages.sort((a, b) => b.averageValue - a.averageValue);
+            const top10 = asinAverages.slice(0, 10);
+            const bottom10 = asinAverages.slice(-10);
+            const selectedAsins = [...top10, ...bottom10];
+
+            return selectedAsins;
+        }
+
+        async function renderChart(parameter) {
+            const data = await processData(parameter);
+            data.sort((a, b) => b.averageValue - a.averageValue);
+
+            // // 更新图表标题
+            // document.getElementById('chart-title').innerText = `${parameter}`;
+
+            const months = Array.from(new Set(data.flatMap(asin => asin.months))).sort();
+            const valuesByMonth = months.map(month =>
+                data.map(asin => {
+                    const monthIndex = asin.months.indexOf(month);
+                    return monthIndex !== -1 ? asin.values[monthIndex] : 0;
+                })
+            );
+
+            const chart = echarts.init(document.getElementById('chart'));
+
+            // 创建图片样式映射
+            const imageStyleMap = {};
+            data.forEach(item => {
+                imageStyleMap[item.asin] = {
+                    height: 35,
+                    width: 35,
+                    align: 'center',
+                    backgroundColor: {
+                        image: item.main_image_link || 'https://m.media-amazon.com/images/I/41hsf4rpu8L.jpg'
+                    }
+                };
+            });
+
+            const option = {
+                baseOption: {
+                    legend: {},
+                    timeline: {
+                        axisType: 'category',
+                        data: months,
+                        autoPlay: false,
+                        playInterval: 2000,
+                        label: { formatter: '{value}' }
+                    },
+                    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+                    xAxis: {
+                        type: 'value',
+                        name: parameter,
+                        min: Math.min(...data.flatMap(asin => asin.values)),
+                        max: Math.max(...data.flatMap(asin => asin.values))
+                    },
+                    yAxis: {
+                        type: 'category',
+                        data: data.map(asin => asin.asin),
+                        axisLabel: {
+                            formatter: function(value) {
+                                return `{${value}|} ${value}`;
+                            },
+                            rich: data.reduce((acc, item) => {
+                                acc[item.asin] = imageStyleMap[item.asin];
+                                return acc;
+                            }, {})
+                        }
+                    },
+                    series: [
+                        {
+                            type: 'bar',
+                            label: { show: true, position: 'right' },
+                            data: []
+                        }
+                    ]
+                },
+                options: months.map((month, index) => ({
+                    series: [
+                        {
+                            data: data.map((asin, asinIndex) => valuesByMonth[index][asinIndex])
+                        }
+                    ]
+                }))
+            };
+
+            chart.setOption(option);
+        }
+
+        // 监听筛选器变化
+        document.getElementById('parameter-select').addEventListener('change', (event) => {
+            const selectedParameter = event.target.value;
+            renderChart(selectedParameter);
+        });
+
+        // 初始渲染图表
+        renderChart('总利润');
+    </script>
+</body>
+
+</html>
